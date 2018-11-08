@@ -203,6 +203,24 @@ size_t Pareto_80_20_6_Rand( const Pareto_80_20_6_Data& data, uint32_t rnum1, uin
 	return data.offsets[ idx ] + offsetInRange;
 }
 
+#ifdef BIT_SIZE_64
+void fillSegmentWithRandomData(uint64_t* ptr, size_t sz, size_t reincarnation)
+{
+	PRNG rng(((uintptr_t)ptr) ^ ((uintptr_t)sz << 32) ^ reincarnation);
+	for (size_t i = 0; i < sz; ++i)
+		ptr[i] = rng.rng64();
+}
+void checkSegment(uint64_t* ptr, size_t sz, size_t reincarnation)
+{
+	PRNG rng(((uintptr_t)ptr) ^ ((uintptr_t)sz << 32) ^ reincarnation);
+	for (size_t i = 0; i < sz; ++i)
+		if (ptr[i] != rng.rng64())
+		{
+			printf("memcheck failed for ptr=%zd, size=%zd, reincarnation=%zd, from %zd\n", (size_t)(ptr), sz, reincarnation, i * 4);
+			throw std::bad_alloc();
+		}
+}
+#else
 void fillSegmentWithRandomData( uint8_t* ptr, size_t sz, size_t reincarnation )
 {
 	PRNG rng( ((uintptr_t)ptr) ^ ((uintptr_t)sz << 32) ^ reincarnation );
@@ -243,6 +261,7 @@ void checkSegment( uint8_t* ptr, size_t sz, size_t reincarnation )
 		}
 	}
 }
+#endif // BIT_SIZE_64
 
 template< class AllocatorUnderTest, MEM_ACCESS_TYPE mat>
 void randomPos_RandomSize( AllocatorUnderTest& allocatorUnderTest, size_t iterCount, size_t maxItems, size_t maxItemSizeExp, size_t threadID, size_t rnd_seed )
@@ -274,12 +293,21 @@ void randomPos_RandomSize( AllocatorUnderTest& allocatorUnderTest, size_t iterCo
 	assert( maxItems <= UINT32_MAX );
 	Pareto_80_20_6_Init( paretoData, (uint32_t)maxItems );
 
+#ifdef BIT_SIZE_64
+	struct TestBin
+	{
+		uint64_t* ptr;
+		uint32_t sz;
+		uint32_t reincarnation;
+	};
+#else
 	struct TestBin
 	{
 		uint8_t* ptr;
 		uint32_t sz;
 		uint32_t reincarnation;
 	};
+#endif // BIT_SIZE_64
 
 	TestBin* baseBuff = nullptr; 
 	if constexpr ( !AllocatorUnderTest::isFake() )
@@ -301,12 +329,22 @@ void randomPos_RandomSize( AllocatorUnderTest& allocatorUnderTest, size_t iterCo
 			{
 				size_t randNumSz = rng.rng64();
 				size_t sz = calcSizeWithStatsAdjustment( randNumSz, maxItemSizeExp );
-				baseBuff[i*32+j].sz = (uint32_t)sz;
-				baseBuff[i*32+j].ptr = reinterpret_cast<uint8_t*>( allocatorUnderTest.allocate( sz ) );
+#ifdef BIT_SIZE_64
+				sz = (sz + 7) >> 3;
+				baseBuff[i * 32 + j].ptr = reinterpret_cast<uint64_t*>(allocatorUnderTest.allocate(sz * 8));
+#else
+				baseBuff[i * 32 + j].ptr = reinterpret_cast<uint8_t*>(allocatorUnderTest.allocate(sz));
+#endif // BIT_SIZE_64
+				baseBuff[i * 32 + j].sz = (uint32_t)sz;
 				if constexpr ( doMemAccess )
 				{
-					if constexpr ( mat == MEM_ACCESS_TYPE::full )
-						memset( baseBuff[i*32+j].ptr, (uint8_t)sz, sz );
+					if constexpr (mat == MEM_ACCESS_TYPE::full) {
+#ifdef BIT_SIZE_64
+						memset(baseBuff[i * 32 + j].ptr, (uint8_t)sz, sz * 8);
+#else
+						memset(baseBuff[i * 32 + j].ptr, (uint8_t)sz, sz);
+#endif // BIT_SIZE_64	
+					}
 					else
 					{ 
 						if constexpr ( mat == MEM_ACCESS_TYPE::single )
@@ -369,13 +407,23 @@ void randomPos_RandomSize( AllocatorUnderTest& allocatorUnderTest, size_t iterCo
 			}
 			else
 			{
-				size_t sz = calcSizeWithStatsAdjustment( rng.rng64(), maxItemSizeExp );
+				size_t sz = calcSizeWithStatsAdjustment( rng.rng64(), maxItemSizeExp ); 
+#ifdef BIT_SIZE_64
+				sz = (sz + 7) >> 3;
+				baseBuff[idx].ptr = reinterpret_cast<uint64_t*>(allocatorUnderTest.allocate(sz * 8));
+#elif
+				baseBuff[idx].ptr = reinterpret_cast<uint8_t*>(allocatorUnderTest.allocate(sz));
+#endif
 				baseBuff[idx].sz = (uint32_t)sz;
-				baseBuff[idx].ptr = reinterpret_cast<uint8_t*>( allocatorUnderTest.allocate( sz ) );
 				if constexpr ( doMemAccess )
 				{
-					if constexpr ( mat == MEM_ACCESS_TYPE::full )
-						memset( baseBuff[idx].ptr, (uint8_t)sz, sz );
+					if constexpr ( mat == MEM_ACCESS_TYPE::full ) {
+#ifdef BIT_SIZE_64
+						memset(baseBuff[idx].ptr, (uint8_t)sz, sz * 8);
+#elif
+						memset(baseBuff[idx].ptr, (uint8_t)sz, sz);
+#endif
+					}
 					else
 					{
 						if constexpr ( mat == MEM_ACCESS_TYPE::single )
@@ -412,8 +460,12 @@ void randomPos_RandomSize( AllocatorUnderTest& allocatorUnderTest, size_t iterCo
 				{
 					size_t i=0;
 					for ( ; i<baseBuff[idx].sz/sizeof(size_t ); ++i )
-						dummyCtr += ( reinterpret_cast<size_t*>( baseBuff[idx].ptr) )[i];
-					uint8_t* tail = baseBuff[idx].ptr + i * sizeof(size_t );
+						dummyCtr += ( reinterpret_cast<size_t*>( baseBuff[idx].ptr) )[i]; 
+#ifdef BIT_SIZE_64
+						uint64_t* tail = baseBuff[idx].ptr + i * sizeof(size_t);
+#elif
+						uint8_t* tail = baseBuff[idx].ptr + i * sizeof(size_t);
+#endif
 					for ( i=0; i<baseBuff[idx].sz % sizeof(size_t); ++i )
 						dummyCtr += tail[i];
 				}
